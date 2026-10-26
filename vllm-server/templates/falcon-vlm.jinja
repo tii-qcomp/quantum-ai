@@ -1,0 +1,15 @@
+{#- Chat template for tiiuae/falcon-11B-vlm, following the model card's format
+    "User:<image>\n{instruction} Falcon:". vLLM inserts the <image> placeholder
+    into the user text for each image content part. -#}
+{%- for message in messages -%}
+{%- if message['role'] == 'system' -%}
+{{ message['content'] | trim }}{{ '\n' }}
+{%- elif message['role'] == 'user' -%}
+{{ 'User:' + message['content'] | trim }}
+{%- elif message['role'] == 'assistant' -%}
+{{ ' Falcon:' + message['content'] | trim + '\n' }}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{ ' Falcon:' }}
+{%- endif -%}

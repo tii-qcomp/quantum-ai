@@ -47,6 +47,8 @@ vllm-server/
 ├── monitoring/             prometheus.yml + Grafana datasource/dashboard provisioning
 ├── scripts/
 │   ├── build.sh            docker build with the right args, target, tag, secrets
+│   ├── prefetch.sh         pull images + weights of several profiles ahead of time
+│   ├── switch-model.sh     switch the running model to another profile
 │   ├── save-image.sh       docker save -> dist/*.tar.zst (or .tar.gz)
 │   ├── load-image.sh       docker load on the server
 │   ├── push.sh             docker push to the registry in IMAGE_NAME
@@ -152,8 +154,11 @@ Only changed layers are downloaded. The model snapshot stays in the `hf-cache` v
 
 - **Automatically** on every push to `main` that touches the image inputs (`Dockerfile`,
   `docker/`, `models/`, `templates/`, `scripts/build.sh`, `scripts/lib.sh`, `.env.example`):
-  the default profile (`falcon-7b-instruct`) without baked weights.
-- **On demand** from the Actions tab (Run workflow) for any profile and either target.
+  every profile in `models/`, without baked weights, as a parallel matrix (one job per profile).
+- **On demand** from the Actions tab (Run workflow): `all` or a comma-separated list of
+  profiles, and either target.
+
+New files in `models/` are picked up automatically; the workflow needs no edits.
 
 Tags per build:
 
@@ -208,6 +213,31 @@ PowerShell, call Git Bash explicitly:
 ```powershell
 & "C:\\Program Files\\Git\\bin\\bash.exe" scripts/save-image.sh
 ```
+
+## Switching models
+
+Images for all profiles are published by CI and share the vLLM base layers, so switching
+is a restart, not a rebuild. Pre-fetch what you expect to use, once:
+
+```bash
+bash scripts/prefetch.sh                    # every profile (about 190 GB of weights)
+bash scripts/prefetch.sh falcon-h1r-7b falcon-h1-7b-instruct falcon-11b-vlm   # or a selection
+```
+
+This pulls each image and downloads its weights into the shared `hf-cache` volume. Then:
+
+```bash
+bash scripts/switch-model.sh                  # list profiles, show the current one
+bash scripts/switch-model.sh falcon-h1r-7b    # or: make switch PROFILE=falcon-h1r-7b
+```
+
+It sets `MODEL_PROFILE` in `.env`, recreates only the `vllm` container and waits until it is
+healthy (a minute or two when the weights are already cached). Open WebUI lists the new
+model automatically. The served model name changes with the profile, so API clients should
+read it from `/v1/models` or be updated.
+
+Only one model runs at a time on the single GPU. Small models could share it with a second
+`vllm` service, with `GPU_MEMORY_UTILIZATION` lowered on both.
 
 ## Using the API
 
@@ -306,16 +336,29 @@ Set `HF_TOKEN` in the shell for gated repos; `build.sh` passes it as a BuildKit 
 never lands in an image layer. Models needing custom code set `TRUST_REMOTE_CODE=1`. Multi-GPU
 hosts set `TENSOR_PARALLEL_SIZE`.
 
-Ready-made profiles:
+Ready-made profiles. CI builds an image for every one of them; weights are fetched on the
+server (first start, or ahead of time with `scripts/prefetch.sh`).
 
-| Profile | Model | Context | Notes |
-|---|---|---|---|
-| `falcon-7b-instruct` | tiiuae/falcon-7b-instruct | 2k | default |
-| `falcon-7b` | tiiuae/falcon-7b | 2k | base model, completions only |
-| `falcon3-7b-instruct` | tiiuae/Falcon3-7B-Instruct | 32k | good general chat with the UI |
-| `falcon-h1r-7b` | tiiuae/Falcon-H1R-7B | 128k (native 256k) | reasoning model, hybrid Transformer + Mamba2; `<think>` goes to `reasoning_content`, tool calling enabled, temperature 0.6 / top-p 0.95 by default |
+| Profile | Model | Weights | Context | Use in calibration work |
+|---|---|---|---|---|
+| `falcon-h1-34b-instruct` | Falcon-H1-34B-Instruct | 67 GB | 32k (native 256k) | Strongest Falcon: agentic planning of experiment sequences, interpreting fits, writing analysis code. Uses most of the GPU. |
+| `falcon-h1r-7b` | Falcon-H1R-7B | 15 GB | 128k (native 256k) | Reasoning (`<think>` in `reasoning_content`): diagnosing anomalous results, multi-step physics reasoning. |
+| `falcon-h1-7b-instruct` | Falcon-H1-7B-Instruct | 15 GB | 128k (native 256k) | General workhorse with tool calling and long context for logs and calibration histories. |
+| `falcon3-10b-instruct` | Falcon3-10B-Instruct | 21 GB | 32k | Dense-attention alternative with tool calling. |
+| `falcon-11b-vlm` | Falcon2-11B-VLM | 23 GB | 8k | Vision: reads calibration plots (spectroscopy, Rabi/Ramsey, chevrons, IQ clouds). No tool calling. |
+| `falcon-h1-1.5b-deep-instruct` | Falcon-H1-1.5B-Deep-Instruct | 3 GB | 128k | Fast inner loops: fit-quality classification, JSON parameter extraction, tool routing. |
+| `falcon-h1-tiny-r-0.6b` | Falcon-H1-Tiny-R-0.6B | 1.2 GB | 64k (native 256k) | Tiny reasoning model for cheap high-throughput checks; quick stack smoke test. |
+| `falcon3-7b-instruct` | Falcon3-7B-Instruct | 15 GB | 32k | Earlier-generation general chat. |
+| `falcon-7b-instruct` | falcon-7b-instruct | 14 GB | 2k | Original 2023 model (default profile). |
+| `falcon-7b` | falcon-7b | 14 GB | 2k | Base model, completions only. |
 
-New profiles must also be added to the `profile` options in the workflow to be buildable from the Actions tab.
+All except the vision and 2023 models have Hermes-style tool calling enabled (`tools` /
+`tool_choice` in the OpenAI API). Every profile supports structured output through
+`response_format` with a JSON schema, which is the reliable way to get machine-readable
+calibration parameters back. Not included: Falcon-E (BitNet ternary weights, not supported
+by vLLM), Falcon-Mamba / Falcon3-Mamba (superseded by Falcon-H1), Falcon-OCR and
+Falcon-Perception (not vLLM-servable architectures), FP8 variants (this project serves full
+precision).
 
 ## Other add-ons worth considering
 

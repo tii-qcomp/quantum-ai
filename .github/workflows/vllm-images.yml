@@ -1,11 +1,18 @@
 # ---------------------------------------------------------------------------
-# Builds the vLLM model image from vllm-server/ and pushes it to GHCR as
+# Builds the vLLM model images from vllm-server/ and pushes them to GHCR as
 #   ghcr.io/<owner>/<repo>/vllm-models:<profile>-<vllm version>[-weights]
 # plus <profile>-latest[-weights] and <profile>-<git sha>[-weights].
 #
-# Runs automatically on pushes to main that touch the image inputs (default
-# profile, weights NOT baked) and on demand for any profile / target.
+# One matrix job per profile (every vllm-server/models/*.env except _*.env), so
+# new profiles are picked up without editing this file. All images share the
+# vLLM base layers; each profile adds only a few KB, so pushes after the first
+# one are quick and registry storage barely grows per profile.
+#
+#   push to main (image inputs changed)  -> all profiles, slim `server` target
+#   Run workflow                          -> chosen profiles and target
+#
 # The GPU server then only needs:  docker compose pull && docker compose up -d
+# (scripts/prefetch.sh pulls several profiles + weights ahead of time).
 #
 # Optional repository secrets:
 #   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   avoid anonymous Docker Hub pull limits on the base image
@@ -27,19 +34,17 @@ on:
       - .github/workflows/vllm-images.yml
   workflow_dispatch:
     inputs:
-      profile:
-        description: Model profile (vllm-server/models/<name>.env)
-        type: choice
-        default: falcon-7b-instruct
-        options:
-          - falcon-7b-instruct
-          - falcon3-7b-instruct
-          - falcon-7b
-          - falcon-h1r-7b
+      profiles:
+        description: >-
+          "all", or a comma-separated list of profiles (file names in
+          vllm-server/models/ without .env), e.g. falcon-h1r-7b,falcon-11b-vlm
+        type: string
+        default: all
       target:
         description: >-
           server = weights downloaded by the container on first start;
-          server-with-weights = weights baked in (+14 GB upload, about an hour)
+          server-with-weights = weights baked in (only for models up to ~20 GB
+          on GitHub-hosted runners)
         type: choice
         default: server
         options:
@@ -51,18 +56,63 @@ permissions:
   packages: write
 
 concurrency:
-  group: vllm-images-${{ inputs.profile || 'falcon-7b-instruct' }}-${{ inputs.target || 'server' }}
+  group: vllm-images-${{ github.ref }}-${{ inputs.target || 'server' }}-${{ inputs.profiles || 'all' }}
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      profiles: ${{ steps.list.outputs.profiles }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve profile list
+        id: list
+        env:
+          REQUESTED: ${{ inputs.profiles || 'all' }}
+        run: |
+          cd vllm-server/models
+          available=()
+          for f in ./*.env; do
+            name="$(basename "$f" .env)"
+            case "$name" in _*) continue ;; esac
+            available+=("$name")
+          done
+          if [ "$REQUESTED" = "all" ]; then
+            selected=("${available[@]}")
+          else
+            IFS=',' read -ra requested <<< "$REQUESTED"
+            selected=()
+            for p in "${requested[@]}"; do
+              p="$(echo "$p" | xargs)"
+              [ -z "$p" ] && continue
+              if [ ! -f "./$p.env" ] || [[ "$p" == _* ]]; then
+                echo "::error::unknown profile '$p'. Available: ${available[*]}"
+                exit 1
+              fi
+              selected+=("$p")
+            done
+          fi
+          json="$(printf '%s\n' "${selected[@]}" | jq -R . | jq -sc .)"
+          echo "profiles=$json" >> "$GITHUB_OUTPUT"
+          echo "Building: $json" >> "$GITHUB_STEP_SUMMARY"
+
   build-push:
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+    name: build ${{ matrix.profile }}
     defaults:
       run:
         working-directory: vllm-server
     env:
-      MODEL_PROFILE: ${{ inputs.profile || 'falcon-7b-instruct' }}
+      MODEL_PROFILE: ${{ matrix.profile }}
       BUILD_TARGET: ${{ inputs.target || 'server' }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -118,7 +168,7 @@ jobs:
             --tag "${IMAGE_NAME}:${MODEL_PROFILE}-latest${suffix}" \
             --tag "${IMAGE_NAME}:${MODEL_PROFILE}-${GIT_SHA::12}${suffix}"
           {
-            echo "### Pushed"
+            echo "### ${MODEL_PROFILE}"
             echo '```'
             echo "${IMAGE_NAME}:${IMAGE_TAG}"
             echo "${IMAGE_NAME}:${MODEL_PROFILE}-latest${suffix}"

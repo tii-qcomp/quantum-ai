@@ -7,7 +7,7 @@ SHELL := /usr/bin/env bash
 -include .env
 export
 
-.PHONY: help build build-slim build-weights push save load pull pull-services up down restart logs status shell smoke check-server download
+.PHONY: help build build-slim build-weights push save load pull prefetch switch pull-services up down restart logs status shell smoke check-server download
 
 help: ## Show this help
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
@@ -32,6 +32,12 @@ load: ## Import an exported image: make load FILE=dist/<file>.tar.zst
 
 pull: ## Pull the CI-built vllm image and the upstream service images
 > docker compose pull
+
+prefetch: ## Pull images + weights ahead of time: make prefetch [PROFILES="a b"] (default: all)
+> bash ./scripts/prefetch.sh $(PROFILES)
+
+switch: ## Switch the running model: make switch PROFILE=<name> (no PROFILE: list them)
+> bash ./scripts/switch-model.sh $(PROFILE)
 
 pull-services: ## Pre-pull only the upstream service images (when the vllm image is built locally)
 > docker compose pull --ignore-pull-failures

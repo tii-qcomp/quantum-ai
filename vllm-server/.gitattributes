@@ -1,0 +1,9 @@
+# Files that end up inside the Linux image or run under bash must keep LF endings,
+# even when the repo is checked out on Windows.
+* text=auto
+*.sh        text eol=lf
+*.jinja     text eol=lf
+*.env       text eol=lf
+*.example   text eol=lf
+Dockerfile  text eol=lf
+Makefile    text eol=lf

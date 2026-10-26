@@ -1,0 +1,18 @@
+# SearXNG settings for use as Open WebUI's web-search backend.
+# Everything not listed here comes from the image's defaults.
+# Reference: https://docs.searxng.org/admin/settings/settings.html
+use_default_settings: true
+
+server:
+  # Replaced at runtime by SEARXNG_SECRET from docker-compose.yml / .env.
+  secret_key: "replaced-by-SEARXNG_SECRET"
+  # The rate limiter needs Valkey/Redis and would throttle Open WebUI; this
+  # instance is private (not published beyond localhost), so keep it off.
+  limiter: false
+  image_proxy: true
+
+search:
+  # Open WebUI calls /search?format=json; json is not enabled by default.
+  formats:
+    - html
+    - json

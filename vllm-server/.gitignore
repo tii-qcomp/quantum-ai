@@ -1,0 +1,11 @@
+# Local deployment config (copy from the .example files)
+.env
+overrides.env
+
+# Exported images and local model caches
+dist/
+hf-cache/
+
+# Python
+__pycache__/
+.venv/

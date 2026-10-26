@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning: every *.json in monitoring/grafana/dashboards/
+# (mounted at /var/lib/grafana/dashboards) is loaded automatically.
+# Get vLLM's official dashboard with:
+#   curl -fsSLo monitoring/grafana/dashboards/vllm.json \
+#     https://raw.githubusercontent.com/vllm-project/vllm/v0.32.0/examples/observability/prometheus_grafana/grafana.json
+apiVersion: 1
+
+providers:
+  - name: local
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

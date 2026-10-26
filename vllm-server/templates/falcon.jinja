@@ -1,0 +1,16 @@
+{#- Minimal "User:/Assistant:" chat template for Falcon models whose tokenizer
+    ships none (e.g. the base tiiuae/falcon-7b). Falcon-7B-Instruct has its own
+    template on the Hub and does not need this file. -#}
+{%- if messages and messages[0]['role'] == 'system' -%}
+{{ messages[0]['content'] | trim }}{{ '\n\n' }}
+{%- endif -%}
+{%- for message in messages -%}
+{%- if message['role'] == 'user' -%}
+{{ 'User: ' + (message['content'] | trim) + '\n' }}
+{%- elif message['role'] == 'assistant' -%}
+{{ 'Assistant: ' + (message['content'] | trim) + '\n' }}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{ 'Assistant:' }}
+{%- endif -%}

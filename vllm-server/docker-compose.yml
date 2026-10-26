@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# Runtime stack. Build the vLLM image with scripts/build.sh (or `make build`),
+# then `docker compose up -d`. All ${VARS} come from .env (see .env.example).
+#
+# Services and profiles (COMPOSE_PROFILES in .env selects the optional ones):
+#   vllm         always       OpenAI-compatible API            :8000
+#   searxng      ui           private metasearch for web search (internal, 127.0.0.1:8081)
+#   open-webui   ui           chat UI over vllm + searxng      :3000
+#   prometheus   monitoring   scrapes vllm /metrics            (internal, 127.0.0.1:9090)
+#   grafana      monitoring   dashboards                       :3001
+#
+# Everything except vllm is an unmodified upstream image; the only files this
+# repo adds are searxng/settings.yml and monitoring/*.yml.
+# Needs Docker Compose v2.24+ and the NVIDIA Container Toolkit on the host.
+# ---------------------------------------------------------------------------
+services:
+  # ======================================================================
+  # LLM server
+  # ======================================================================
+  vllm:
+    image: ${IMAGE_NAME:?set IMAGE_NAME in .env}:${IMAGE_TAG:-${MODEL_PROFILE}-${VLLM_VERSION}}
+    container_name: vllm-${MODEL_PROFILE:?set MODEL_PROFILE in .env}
+    restart: unless-stopped
+    ipc: host                     # vLLM shares memory between its worker processes
+    stop_grace_period: 30s
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${HOST_PORT:-8000}:8000"
+    environment:
+      # Passed through from the shell / .env only when set; never written into the image.
+      - HF_TOKEN
+      - VLLM_API_KEY
+    env_file:
+      # Optional per-deployment overrides of the profile baked into the image.
+      - path: ./overrides.env
+        required: false
+    volumes:
+      # Hugging Face cache for images built WITHOUT baked weights (BUILD_TARGET=server).
+      # Named volume by default; set HF_CACHE_DIR to a host path to bind-mount instead.
+      # Images with baked weights keep them under /models/baked and ignore this mount.
+      - ${HF_CACHE_DIR:-hf-cache}:/models/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # single GPU host; use `device_ids: ["0"]` to pin one
+              capabilities: [gpu]
+
+  # ======================================================================
+  # ui profile: web search engine + chat interface
+  # ======================================================================
+  searxng:
+    # Private metasearch engine. Open WebUI queries it in JSON; nothing else
+    # needs to reach it, so it is only published on localhost for debugging.
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    profiles: [ui]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SEARXNG_HOST_PORT:-8081}:8080"
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-please-set-SEARXNG_SECRET-in-dotenv}
+      SEARXNG_BASE_URL: http://localhost:${SEARXNG_HOST_PORT:-8081}/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  open-webui:
+    # Chat UI. Talks to vllm through the OpenAI API and to searxng for web
+    # search. First account created becomes admin. Data lives in the volume.
+    # NOTE: the settings below only seed the first start; afterwards Open WebUI
+    # keeps them in its database and they are edited in Admin > Settings.
+    # Set ENABLE_PERSISTENT_CONFIG=false to make this file the source of truth.
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-main}
+    profiles: [ui]
+    restart: unless-stopped
+    depends_on:
+      - vllm
+      - searxng
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${WEBUI_HOST_PORT:-3000}:8080"
+    environment:
+      # Backend
+      OPENAI_API_BASE_URL: http://vllm:8000/v1
+      OPENAI_API_KEY: ${VLLM_API_KEY:-none}
+      ENABLE_OLLAMA_API: "false"
+      # Web search via SearXNG
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: http://searxng:8080/search?q=<query>
+      WEB_SEARCH_RESULT_COUNT: ${WEB_SEARCH_RESULT_COUNT:-3}
+      WEB_SEARCH_CONCURRENT_REQUESTS: "10"
+      # Retrieval sizing: RAG_TOP_K x CHUNK_SIZE tokens are injected into the
+      # prompt. Falcon-7B only has a 2048-token window, hence the small defaults.
+      CHUNK_SIZE: ${RAG_CHUNK_SIZE:-400}
+      CHUNK_OVERLAP: "50"
+      RAG_TOP_K: ${RAG_TOP_K:-3}
+      # Session signing key; set it so logins survive container re-creation.
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+    volumes:
+      - open-webui:/app/backend/data
+
+  # ======================================================================
+  # monitoring profile: vLLM metrics
+  # ======================================================================
+  prometheus:
+    image: docker.io/prom/prometheus:${PROMETHEUS_VERSION:-latest}
+    profiles: [monitoring]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+
+  grafana:
+    # Prometheus datasource is provisioned, and any *.json dropped into
+    # monitoring/grafana/dashboards/ is loaded as a dashboard (see README).
+    image: docker.io/grafana/grafana:${GRAFANA_VERSION:-latest}
+    profiles: [monitoring]
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${GRAFANA_HOST_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+
+volumes:
+  hf-cache:
+  searxng-cache:
+  open-webui:
+  prometheus:
+  grafana:

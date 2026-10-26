@@ -1,0 +1,6 @@
+# Allow-list: only what the Dockerfile COPYs reaches the build context.
+*
+!Dockerfile
+!docker/
+!models/
+!templates/

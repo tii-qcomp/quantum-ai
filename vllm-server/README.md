@@ -198,8 +198,16 @@ bash scripts/load-image.sh ~/<file>.tar.zst        # then docker compose up -d
 ```
 
 zstd is used when available (`apt-get install zstd`, or `winget install zstd` on Windows),
-otherwise gzip. On Windows, run the scripts from Git Bash; Docker Desktop builds
-`linux/amd64` images.
+otherwise gzip. Docker Desktop builds `linux/amd64` images.
+
+On Windows, run the scripts with **Git Bash**. In PowerShell, plain `bash` starts WSL's
+bash, which cannot see Docker Desktop unless WSL integration is enabled for that distro
+(symptoms: `image ... not found locally`, `/var/run/docker.sock: no such file`). From
+PowerShell, call Git Bash explicitly:
+
+```powershell
+& "C:\\Program Files\\Git\\bin\\bash.exe" scripts/save-image.sh
+```
 
 ## Using the API
 

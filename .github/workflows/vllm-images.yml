@@ -35,6 +35,7 @@ on:
           - falcon-7b-instruct
           - falcon3-7b-instruct
           - falcon-7b
+          - falcon-h1r-7b
       target:
         description: >-
           server = weights downloaded by the container on first start;

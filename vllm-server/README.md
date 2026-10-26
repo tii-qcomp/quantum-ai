@@ -306,8 +306,16 @@ Set `HF_TOKEN` in the shell for gated repos; `build.sh` passes it as a BuildKit 
 never lands in an image layer. Models needing custom code set `TRUST_REMOTE_CODE=1`. Multi-GPU
 hosts set `TENSOR_PARALLEL_SIZE`.
 
-Ready-made profiles: `falcon-7b-instruct` (default), `falcon-7b` (base model, completions
-only) and `falcon3-7b-instruct` (32k context, recommended with the UI).
+Ready-made profiles:
+
+| Profile | Model | Context | Notes |
+|---|---|---|---|
+| `falcon-7b-instruct` | tiiuae/falcon-7b-instruct | 2k | default |
+| `falcon-7b` | tiiuae/falcon-7b | 2k | base model, completions only |
+| `falcon3-7b-instruct` | tiiuae/Falcon3-7B-Instruct | 32k | good general chat with the UI |
+| `falcon-h1r-7b` | tiiuae/Falcon-H1R-7B | 128k (native 256k) | reasoning model, hybrid Transformer + Mamba2; `<think>` goes to `reasoning_content`, tool calling enabled, temperature 0.6 / top-p 0.95 by default |
+
+New profiles must also be added to the `profile` options in the workflow to be buildable from the Actions tab.
 
 ## Other add-ons worth considering
 

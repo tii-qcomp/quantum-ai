@@ -2,8 +2,12 @@
 
 Reproducible Docker images for serving LLMs with [vLLM](https://docs.vllm.ai) behind an
 OpenAI-compatible API, plus a chat UI with web search and optional monitoring, all from
-upstream images. Build the model image once, ship it to the GPU box, `docker compose up`.
-Models are small profile files, so a second model is a new profile, not a new project.
+upstream images. GitHub Actions builds the model image and publishes it to GHCR; the GPU
+box only pulls and runs. Models are small profile files, so a second model is a new
+profile, not a new project.
+
+Repository: https://github.com/tii-qcomp/quantum-ai (folder `vllm-server/`).
+Images: `ghcr.io/tii-qcomp/quantum-ai/vllm-models:<profile>-<vllm version>`.
 
 Default profile: **Falcon-7B-Instruct in bf16** (its native precision, no quantization) on an
 NVIDIA RTX PRO 6000 Blackwell (96 GB), driver 595 / CUDA 13.2.
@@ -12,7 +16,7 @@ NVIDIA RTX PRO 6000 Blackwell (96 GB), driver 595 / CUDA 13.2.
 
 | Service | Image | Profile | Port on the host | Purpose |
 |---|---|---|---|---|
-| `vllm` | built here from `vllm/vllm-openai` | always | 8000 | OpenAI-compatible API |
+| `vllm` | `ghcr.io/tii-qcomp/quantum-ai/vllm-models` (built by CI from `vllm/vllm-openai`) | always | 8000 | OpenAI-compatible API |
 | `open-webui` | `ghcr.io/open-webui/open-webui` | `ui` | 3000 | Chat UI, documents, web search |
 | `searxng` | `searxng/searxng` | `ui` | 127.0.0.1:8081 | Private metasearch engine behind Open WebUI |
 | `prometheus` | `prom/prometheus` | `monitoring` | 127.0.0.1:9090 | Scrapes vLLM `/metrics` |
@@ -25,6 +29,7 @@ files (`searxng/settings.yml`, `monitoring/*.yml`).
 ## Layout
 
 ```
+.github/workflows/vllm-images.yml   CI: builds the model image, pushes it to GHCR
 vllm-server/
 ├── Dockerfile              two targets: server (no weights) and server-with-weights
 ├── docker-compose.yml      vllm + optional ui / monitoring profiles
@@ -61,15 +66,12 @@ vllm-server/
 Precedence at container start: environment (compose `environment:`, `overrides.env`, `-e`)
 beats the baked profile. Empty values count as "not set".
 
-## Quick start
+## Quick start: deploy on the GPU server
 
 ### 0. Prerequisites
 
-Build machine: Docker with BuildKit (Docker Desktop on Windows is fine, it builds `linux/amd64`
-images). Run the scripts from Git Bash or WSL on Windows.
-
-GPU server (Ubuntu): NVIDIA driver, Docker Engine, Compose v2.24+, NVIDIA Container Toolkit.
-To install the toolkit:
+Ubuntu with the NVIDIA driver, Docker Engine, Compose v2.24+ and the NVIDIA Container
+Toolkit. To install the toolkit:
 
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -82,72 +84,44 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-Then, from a checkout of this folder on the server:
+### 1. Clone and configure
 
 ```bash
-cp .env.example .env              # fill SEARXNG_SECRET and WEBUI_SECRET_KEY: openssl rand -hex 32
+git clone https://github.com/tii-qcomp/quantum-ai.git
+cd quantum-ai/vllm-server
+cp .env.example .env
+openssl rand -hex 32    # paste into SEARXNG_SECRET in .env
+openssl rand -hex 32    # paste into WEBUI_SECRET_KEY in .env
 bash scripts/check-server.sh      # or: make check-server
 ```
 
-### 1. Build the model image
+`.env` is git-ignored; the defaults already point at the CI-built image for the
+`falcon-7b-instruct` profile. Change `MODEL_PROFILE` to run another published profile.
+
+### 2. Log in to GHCR (private packages only)
+
+If the repository, and therefore the package, is private, the server needs a token with
+`read:packages`:
 
 ```bash
-cp .env.example .env              # already done in this checkout
-bash scripts/build.sh             # or: make build
+echo <token> | docker login ghcr.io -u <github-user> --password-stdin
 ```
 
-With the defaults this builds `local/vllm-models:falcon-7b-instruct-v0.32.0` from the
-`server-with-weights` target: the vLLM v0.32.0 CUDA 13 image plus the Falcon-7B-Instruct
-snapshot (safetensors only, pinned commit) baked in. The result runs fully offline.
-Size: the vLLM base is about 20 GB uncompressed, the weights add 14.4 GB.
+Public packages pull anonymously.
 
-`BUILD_TARGET=server bash scripts/build.sh` (or `make build-slim`) builds the same image
-without weights; they are then downloaded into the `hf-cache` volume on first start.
-
-### 2. Ship it to the server
-
-Either path works; pick one.
-
-**A. Tarball over scp / rsync** (no registry needed)
+### 3. Pull and run
 
 ```bash
-bash scripts/save-image.sh                     # writes dist/local_vllm-models_falcon-7b-instruct-v0.32.0.tar.zst
-rsync -avP dist/*.tar.zst user@server:~/
-# on the server
-bash scripts/load-image.sh ~/local_vllm-models_falcon-7b-instruct-v0.32.0.tar.zst
-```
-
-zstd is used when available (`apt-get install zstd`, or `winget install zstd` on Windows),
-otherwise gzip. `.tar.gz` and plain `.tar` are accepted on both ends.
-
-**B. Registry**
-
-```bash
-# .env: IMAGE_NAME=ghcr.io/<user>/vllm-models
-docker login ghcr.io -u <user>
-bash scripts/push.sh
-# on the server
-docker compose pull
-```
-
-**C. Build on the server instead.** Clone this folder there and run step 1 on the GPU box.
-Simplest when the server has internet access.
-
-The other services are pulled from their registries on the server (`make pull-services`
-does it ahead of time).
-
-### 3. Run
-
-On the server, in this folder with the same `.env`:
-
-```bash
+docker compose pull               # or: make pull
 docker compose up -d              # or: make up
 docker compose logs -f vllm       # or: make logs
 ```
 
-First start of `vllm` takes a few minutes: weight loading, `torch.compile`, CUDA-graph
-capture. The container reports `healthy` once `/health` answers. Everything restarts
-automatically on reboot (`restart: unless-stopped`).
+First start of `vllm` takes a few minutes: with the default (`server`) image the container
+first downloads the pinned model snapshot into the `hf-cache` volume (14 GB for Falcon-7B,
+once), then loads it, runs `torch.compile` and captures CUDA graphs. The container reports
+`healthy` once `/health` answers. Everything restarts automatically on reboot
+(`restart: unless-stopped`).
 
 Open WebUI is up at `http://server:3000` right away; it lists the model as soon as vLLM is
 healthy. The first account you create there is the admin.
@@ -160,6 +134,72 @@ bash scripts/smoke-test.sh http://server:8000       # from anywhere
 pip install -r tests/requirements.txt && python tests/smoke_test.py --base-url http://server:8000/v1
 curl 'http://127.0.0.1:8081/search?q=vllm&format=json' | head -c 300   # SearXNG, on the server
 ```
+
+### Updating
+
+```bash
+git pull && docker compose pull && docker compose up -d
+```
+
+Only changed layers are downloaded. The model snapshot stays in the `hf-cache` volume.
+
+## Building the images
+
+### GitHub Actions (default)
+
+[.github/workflows/vllm-images.yml](../.github/workflows/vllm-images.yml) builds
+`vllm-server/Dockerfile` and pushes to `ghcr.io/tii-qcomp/quantum-ai/vllm-models`:
+
+- **Automatically** on every push to `main` that touches the image inputs (`Dockerfile`,
+  `docker/`, `models/`, `templates/`, `scripts/build.sh`, `scripts/lib.sh`, `.env.example`):
+  the default profile (`falcon-7b-instruct`) without baked weights.
+- **On demand** from the Actions tab (Run workflow) for any profile and either target.
+
+Tags per build:
+
+| Tag | Meaning |
+|---|---|
+| `<profile>-<vllm version>` (e.g. `falcon-7b-instruct-v0.32.0`) | what `.env` resolves to by default |
+| `<profile>-latest` | moving alias of the newest build |
+| `<profile>-<git sha>` | immutable |
+| any of the above with `-weights` | `server-with-weights` builds; set `IMAGE_TAG` in `.env` to use one |
+
+Notes:
+
+- The vLLM base is re-pushed to GHCR (about 10 GB compressed); blobs that already exist are
+  skipped, so builds after the first one upload only the small top layers. A slim build
+  takes 15 to 30 minutes, a baked-weights build about an hour.
+- The job frees runner disk space and moves Docker's storage to the runner's larger `/mnt`
+  disk when available. Baked-weights builds are at the edge of a hosted runner's disk;
+  if one fails on space, build locally instead (below).
+- GHCR storage for private packages is billed beyond the free quota. With pinned
+  `VLLM_VERSION` the base layers are shared by every profile tag.
+- The image carries `org.opencontainers.image.source` pointing at this repository, so the
+  package links to it. On first publish, check the package's visibility and enable
+  "inherit access from source repository" in the package settings on GitHub.
+- Optional repository secrets: `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` (avoids anonymous
+  Docker Hub pull limits on the base image) and `HF_TOKEN` (gated models only).
+
+### Locally (offline hosts, experiments)
+
+```bash
+bash scripts/build.sh                                    # target from BUILD_TARGET in .env
+BUILD_TARGET=server-with-weights bash scripts/build.sh   # self-contained image, +14 GB
+bash scripts/build.sh --push                             # build and push to IMAGE_NAME directly
+```
+
+For a host without registry access, ship a tarball instead:
+
+```bash
+bash scripts/save-image.sh                         # dist/<image>_<tag>.tar.zst
+rsync -avP dist/*.tar.zst user@server:~/
+# on the server
+bash scripts/load-image.sh ~/<file>.tar.zst        # then docker compose up -d
+```
+
+zstd is used when available (`apt-get install zstd`, or `winget install zstd` on Windows),
+otherwise gzip. On Windows, run the scripts from Git Bash; Docker Desktop builds
+`linux/amd64` images.
 
 ## Using the API
 
@@ -300,6 +340,7 @@ All of these are upstream images plus a few lines of compose; none is wired in y
 | Image pulled on the server but compose can't find it | `docker image ls`, then make `IMAGE_NAME` / `IMAGE_TAG` in `.env` match. |
 | Need to serve a different model with an existing slim image | Set `MODEL`, `MODEL_REVISION`, `SERVED_MODEL_NAME`, `MAX_MODEL_LEN` in `overrides.env`. Not possible with `server-with-weights` images (`HF_HUB_OFFLINE=1`). |
 | `error from registry: denied` pulling `ghcr.io/open-webui/...` | A stale `docker login ghcr.io` is stored (`docker-credential-desktop list` / `~/.docker/config.json`). The image is public: `docker logout ghcr.io`, or log in again with a token that has `read:packages`. |
+| `denied` or `unauthorized` pulling `ghcr.io/tii-qcomp/...` on the server | Private package: `docker login ghcr.io` with a token that has `read:packages`, or make the package public. |
 | Open WebUI shows no model | vLLM not healthy yet (`make status`), or `VLLM_API_KEY` set after Open WebUI's first start: update the key under Admin > Settings > Connections. |
 | Web search returns `403` from SearXNG | `json` missing from `search.formats` in `searxng/settings.yml`, or the rate limiter was turned on. |
 | `maximum context length` errors with web search or documents | Lower `RAG_TOP_K` / `RAG_CHUNK_SIZE`, start a new chat, or switch to the `falcon3-7b-instruct` profile. |

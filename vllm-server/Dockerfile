@@ -14,6 +14,7 @@
 #   VLLM_IMAGE     base image repository       (default vllm/vllm-openai)
 #   VLLM_VERSION   base image tag              (default v0.32.0 = CUDA 13.0 build)
 #   MODEL_PROFILE  name of models/<name>.env   (required)
+#   SOURCE_URL     repository URL for the OCI source label (links the GHCR package to the repo)
 #
 # Secrets (optional, only for gated Hugging Face repos):
 #   --secret id=hf_token,env=HF_TOKEN
@@ -45,8 +46,15 @@ RUN sed -i 's/\r$//' /opt/llm/entrypoint.sh /opt/llm/profile.env /opt/llm/templa
  && mkdir -p /models/hf
 
 ARG VLLM_VERSION
+ARG SOURCE_URL=""
+# Override the OCI labels inherited from the vLLM base image so registries
+# attribute this image to its own repository.
 LABEL org.opencontainers.image.title="vllm-${MODEL_PROFILE}" \
       org.opencontainers.image.description="vLLM OpenAI-compatible server, profile ${MODEL_PROFILE}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.url="${SOURCE_URL}" \
+      org.opencontainers.image.version="" \
+      org.opencontainers.image.revision="" \
       llm.profile="${MODEL_PROFILE}" \
       llm.vllm.version="${VLLM_VERSION}" \
       llm.weights.baked="false"

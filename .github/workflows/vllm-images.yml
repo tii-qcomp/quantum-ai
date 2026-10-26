@@ -1,0 +1,126 @@
+# ---------------------------------------------------------------------------
+# Builds the vLLM model image from vllm-server/ and pushes it to GHCR as
+#   ghcr.io/<owner>/<repo>/vllm-models:<profile>-<vllm version>[-weights]
+# plus <profile>-latest[-weights] and <profile>-<git sha>[-weights].
+#
+# Runs automatically on pushes to main that touch the image inputs (default
+# profile, weights NOT baked) and on demand for any profile / target.
+# The GPU server then only needs:  docker compose pull && docker compose up -d
+#
+# Optional repository secrets:
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   avoid anonymous Docker Hub pull limits on the base image
+#   HF_TOKEN                               only for gated Hugging Face models
+# ---------------------------------------------------------------------------
+name: vllm images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - vllm-server/Dockerfile
+      - vllm-server/docker/**
+      - vllm-server/models/**
+      - vllm-server/templates/**
+      - vllm-server/scripts/build.sh
+      - vllm-server/scripts/lib.sh
+      - vllm-server/.env.example
+      - .github/workflows/vllm-images.yml
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Model profile (vllm-server/models/<name>.env)
+        type: choice
+        default: falcon-7b-instruct
+        options:
+          - falcon-7b-instruct
+          - falcon3-7b-instruct
+          - falcon-7b
+      target:
+        description: >-
+          server = weights downloaded by the container on first start;
+          server-with-weights = weights baked in (+14 GB upload, about an hour)
+        type: choice
+        default: server
+        options:
+          - server
+          - server-with-weights
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: vllm-images-${{ inputs.profile || 'falcon-7b-instruct' }}-${{ inputs.target || 'server' }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: vllm-server
+    env:
+      MODEL_PROFILE: ${{ inputs.profile || 'falcon-7b-instruct' }}
+      BUILD_TARGET: ${{ inputs.target || 'server' }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space (the vLLM base image alone is ~20 GB unpacked)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Put Docker's storage on the runner's /mnt disk when it has more room
+        run: |
+          if mountpoint -q /mnt && [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
+            sudo systemctl stop docker
+            sudo mkdir -p /mnt/docker
+            sudo bash -c 'f=/etc/docker/daemon.json; [ -s "$f" ] || echo "{}" > "$f"; jq ". + {\"data-root\": \"/mnt/docker\"}" "$f" > /tmp/daemon.json && mv /tmp/daemon.json "$f"'
+            sudo systemctl start docker
+          fi
+          docker info --format 'docker data-root: {{.DockerRootDir}}'
+          df -h / /mnt 2>/dev/null || df -h /
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub (only if the optional secrets exist)
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        env:
+          IMAGE_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          cp .env.example .env
+          export IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}/vllm-models"
+          vllm_version="$(sed -n 's/^VLLM_VERSION=//p' .env.example)"
+          suffix=""
+          [ "$BUILD_TARGET" = "server-with-weights" ] && suffix="-weights"
+          export IMAGE_TAG="${MODEL_PROFILE}-${vllm_version}${suffix}"
+          bash scripts/build.sh --push \
+            --tag "${IMAGE_NAME}:${MODEL_PROFILE}-latest${suffix}" \
+            --tag "${IMAGE_NAME}:${MODEL_PROFILE}-${GIT_SHA::12}${suffix}"
+          {
+            echo "### Pushed"
+            echo '```'
+            echo "${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "${IMAGE_NAME}:${MODEL_PROFILE}-latest${suffix}"
+            echo "${IMAGE_NAME}:${MODEL_PROFILE}-${GIT_SHA::12}${suffix}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -7,7 +7,7 @@ SHELL := /usr/bin/env bash
 -include .env
 export
 
-.PHONY: help build build-slim build-weights push save load pull-services up down restart logs status shell smoke check-server download
+.PHONY: help build build-slim build-weights push save load pull pull-services up down restart logs status shell smoke check-server download
 
 help: ## Show this help
 > @grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
@@ -30,7 +30,10 @@ save: ## Export the image to dist/ for transfer with scp/rsync
 load: ## Import an exported image: make load FILE=dist/<file>.tar.zst
 > bash ./scripts/load-image.sh "$(FILE)"
 
-pull-services: ## Pre-pull the upstream images of the enabled profiles (Open WebUI, SearXNG, ...)
+pull: ## Pull the CI-built vllm image and the upstream service images
+> docker compose pull
+
+pull-services: ## Pre-pull only the upstream service images (when the vllm image is built locally)
 > docker compose pull --ignore-pull-failures
 
 up: ## Start the stack in the background (vllm + the profiles in COMPOSE_PROFILES)

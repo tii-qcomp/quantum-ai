@@ -5,6 +5,7 @@
 #   scripts/build.sh                      target from BUILD_TARGET in .env
 #   BUILD_TARGET=server scripts/build.sh  build without baked weights
 #   scripts/build.sh --no-cache           extra args go straight to docker build
+#   scripts/build.sh --push               build and push to IMAGE_NAME in one go (what CI does)
 #
 # Set HF_TOKEN in the environment to download gated models during the build.
 # ---------------------------------------------------------------------------
@@ -23,7 +24,11 @@ args=(
   --build-arg "VLLM_IMAGE=$VLLM_IMAGE"
   --build-arg "VLLM_VERSION=$VLLM_VERSION"
   --build-arg "MODEL_PROFILE=$MODEL_PROFILE"
+  --build-arg "SOURCE_URL=${IMAGE_SOURCE_URL:-}"
   --label "llm.build.target=$BUILD_TARGET"
+  --label "org.opencontainers.image.version=$IMAGE_TAG"
+  --label "org.opencontainers.image.revision=${GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+  --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --tag "$IMAGE_REF"
 )
 if [[ -n "${HF_TOKEN:-}" ]]; then
@@ -38,7 +43,7 @@ log "  target:  $BUILD_TARGET"
 DOCKER_BUILDKIT=1 docker build "${args[@]}" "$@" .
 
 log "built $IMAGE_REF"
-docker image ls "$IMAGE_REF" --format '    {{.Repository}}:{{.Tag}}  {{.Size}}  (id {{.ID}})'
+docker image ls "$IMAGE_REF" --format '    {{.Repository}}:{{.Tag}}  {{.Size}}  (id {{.ID}})' 2>/dev/null || true
 cat <<EOF >&2
 
 Next:

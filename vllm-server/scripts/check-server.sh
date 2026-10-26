@@ -29,6 +29,23 @@ else
   bad "cannot talk to the docker daemon (is $(id -un) in the docker group? sudo usermod -aG docker \$USER, then re-login)"
 fi
 
+# A credsStore/credHelper whose binary is missing breaks every pull, even of public images
+# (typical: "desktop" left over from Docker Desktop or a copied config.json).
+cfg="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+if [[ -f "$cfg" ]]; then
+  helpers="$(grep -oE '"(credsStore|credHelpers)"[^}]*' "$cfg" | grep -oE ':[[:space:]]*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' | sort -u)"
+  missing=""
+  for h in $helpers; do
+    command -v "docker-credential-$h" >/dev/null 2>&1 || missing+=" docker-credential-$h"
+  done
+  if [[ -n "$missing" ]]; then
+    bad "credential helper(s) referenced in $cfg not installed:$missing"
+    info "fix: python3 -c \"import json,os; p=os.path.expanduser('$cfg'); c=json.load(open(p)); c.pop('credsStore',None); c.pop('credHelpers',None); json.dump(c,open(p,'w'),indent=2)\""
+  else
+    ok "docker client config ($cfg) has no missing credential helpers"
+  fi
+fi
+
 echo "NVIDIA driver"
 if command -v nvidia-smi >/dev/null 2>&1; then
   ok "$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader | paste -sd ';' -)"

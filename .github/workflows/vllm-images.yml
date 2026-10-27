@@ -8,7 +8,8 @@
 # vLLM base layers; each profile adds only a few KB, so pushes after the first
 # one are quick and registry storage barely grows per profile.
 #
-#   push to main (image inputs changed)  -> all profiles, slim `server` target
+#   push to main (shared image inputs)   -> all profiles, slim `server` target
+#   push to main (only models/<p>.env)   -> just those profiles
 #   Run workflow                          -> chosen profiles and target
 #
 # The GPU server then only needs:  docker compose pull && docker compose up -d
@@ -66,12 +67,56 @@ jobs:
       profiles: ${{ steps.list.outputs.profiles }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
+      # On push, narrow "all" down to what the pushed commits touched:
+      #   shared image inputs (Dockerfile, docker/, build scripts, this
+      #   workflow, or VLLM_IMAGE/VLLM_VERSION/BUILD_PLATFORM in .env.example)
+      #                                   -> every profile
+      #   models/<p>.env, templates/<t>   -> those profiles / the profiles with
+      #                                      CHAT_TEMPLATE=<t>
+      #   anything else (e.g. ports or RAG settings in .env.example) -> nothing
       - name: Resolve profile list
         id: list
         env:
           REQUESTED: ${{ inputs.profiles || 'all' }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
         run: |
+          changed_profiles=()
+          if [ "$EVENT" = "push" ] && [ "$REQUESTED" = "all" ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            shared=false
+            while IFS= read -r path; do
+              case "$path" in
+                vllm-server/models/_*) ;;
+                vllm-server/models/*.env)
+                  [ -f "$path" ] && changed_profiles+=("$(basename "$path" .env)") ;;
+                vllm-server/.env.example)
+                  if git diff "$BEFORE" "$AFTER" -- "$path" \
+                     | grep -Eq '^[+-](VLLM_IMAGE|VLLM_VERSION|BUILD_PLATFORM)='; then
+                    shared=true
+                  fi ;;
+                vllm-server/templates/*)
+                  # Only the profiles that select this template behave differently
+                  tpl="$(basename "$path")"
+                  while IFS= read -r f; do
+                    changed_profiles+=("$(basename "$f" .env)")
+                  done < <(grep -lx "CHAT_TEMPLATE=$tpl" vllm-server/models/[!_]*.env || true) ;;
+                vllm-server/Dockerfile|vllm-server/docker/*|\
+                vllm-server/scripts/build.sh|vllm-server/scripts/lib.sh|\
+                .github/workflows/vllm-images.yml)
+                  shared=true ;;
+              esac
+            done < <(git diff --name-only "$BEFORE" "$AFTER")
+            if [ "$shared" = false ]; then
+              REQUESTED="$(IFS=,; echo "${changed_profiles[*]}")"
+              [ -z "$REQUESTED" ] && REQUESTED="none"
+            fi
+          fi
+
           cd vllm-server/models
           available=()
           for f in ./*.env; do
@@ -79,7 +124,9 @@ jobs:
             case "$name" in _*) continue ;; esac
             available+=("$name")
           done
-          if [ "$REQUESTED" = "all" ]; then
+          if [ "$REQUESTED" = "none" ]; then
+            selected=()
+          elif [ "$REQUESTED" = "all" ]; then
             selected=("${available[@]}")
           else
             IFS=',' read -ra requested <<< "$REQUESTED"
@@ -94,12 +141,17 @@ jobs:
               selected+=("$p")
             done
           fi
-          json="$(printf '%s\n' "${selected[@]}" | jq -R . | jq -sc .)"
+          if [ "${#selected[@]}" -eq 0 ]; then
+            json='[]'
+          else
+            json="$(printf '%s\n' "${selected[@]}" | jq -R . | jq -sc .)"
+          fi
           echo "profiles=$json" >> "$GITHUB_OUTPUT"
           echo "Building: $json" >> "$GITHUB_STEP_SUMMARY"
 
   build-push:
     needs: plan
+    if: needs.plan.outputs.profiles != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:

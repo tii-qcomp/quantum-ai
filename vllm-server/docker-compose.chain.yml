@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
-# "chain" overlay: Falcon-H1R-7B and Falcon-H1-Tiny-R-0.6B side by side on the
-# one GPU, each with a small memory budget, for multi-step inference chains
-# (tiny model for cheap high-volume steps, 7B for the hard reasoning steps).
+# "chain" overlay: Falcon-H1R-7B and Falcon-H1-1.5B-Deep-Instruct side by side
+# on the one GPU, each with a small memory budget, for multi-step inference
+# chains (1.5B for fast high-volume steps such as classification, JSON
+# extraction and tool routing; 7B for the hard reasoning steps).
 #
 # vLLM serves one model per process, so this is two vllm containers using the
 # two CI-built profile images; nothing new is built. Enable it in .env:
@@ -11,13 +12,13 @@
 #
 # then `docker compose pull && docker compose up -d`.
 #
-#   vllm        falcon-h1r-7b           :8000   model "falcon-h1r-7b"
-#   vllm-tiny   falcon-h1-tiny-r-0.6b   :8001   model "falcon-h1-tiny-r-0.6b"
+#   vllm        falcon-h1r-7b                 :8000  model "falcon-h1r-7b"
+#   vllm-small  falcon-h1-1.5b-deep-instruct  :8001  model "falcon-h1-1.5b-deep-instruct"
 #
 # Memory: vLLM's GPU_MEMORY_UTILIZATION is a per-instance budget (fraction of
 # the whole 96 GB), so the two add up. Defaults: 0.30 + 0.10 = ~38 GB, leaving
 # more than half the GPU free. Tune with the CHAIN_* variables in .env.
-# vllm-tiny starts only after vllm is healthy, so the two startup memory
+# vllm-small starts only after vllm is healthy, so the two startup memory
 # profiling passes never overlap.
 # ---------------------------------------------------------------------------
 services:
@@ -31,9 +32,9 @@ services:
       MAX_MODEL_LEN: ${CHAIN_MAIN_MAX_MODEL_LEN:-65536}
       MAX_NUM_SEQS: ${CHAIN_MAIN_MAX_NUM_SEQS:-32}
 
-  vllm-tiny:
-    image: ${IMAGE_NAME}:falcon-h1-tiny-r-0.6b-${VLLM_VERSION}
-    container_name: vllm-falcon-h1-tiny-r-0.6b
+  vllm-small:
+    image: ${IMAGE_NAME}:falcon-h1-1.5b-deep-instruct-${VLLM_VERSION}
+    container_name: vllm-falcon-h1-1.5b-deep-instruct
     restart: unless-stopped
     ipc: host
     stop_grace_period: 30s
@@ -41,15 +42,15 @@ services:
       vllm:
         condition: service_healthy
     ports:
-      - "${BIND_ADDRESS:-0.0.0.0}:${TINY_HOST_PORT:-8001}:8000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${SMALL_HOST_PORT:-8001}:8000"
     environment:
       # Not overrides.env: its keys (MODEL=, ...) are meant for the main vllm.
       HF_TOKEN:
       VLLM_API_KEY:
-      # 1.2 GB of weights; the rest is cache for many short parallel calls.
-      GPU_MEMORY_UTILIZATION: ${CHAIN_TINY_GPU_UTIL:-0.10}
-      MAX_MODEL_LEN: ${CHAIN_TINY_MAX_MODEL_LEN:-32768}
-      MAX_NUM_SEQS: ${CHAIN_TINY_MAX_NUM_SEQS:-128}
+      # 3 GB of weights; the rest is cache for many short parallel calls.
+      GPU_MEMORY_UTILIZATION: ${CHAIN_SMALL_GPU_UTIL:-0.10}
+      MAX_MODEL_LEN: ${CHAIN_SMALL_MAX_MODEL_LEN:-32768}
+      MAX_NUM_SEQS: ${CHAIN_SMALL_MAX_NUM_SEQS:-128}
     volumes:
       - ${HF_CACHE_DIR:-hf-cache}:/models/hf
     deploy:
@@ -63,7 +64,7 @@ services:
   open-webui:
     # Both models in the model picker. Like the rest of the Open WebUI
     # settings this only seeds the first start; on an existing install add
-    # http://vllm-tiny:8000/v1 under Admin > Settings > Connections.
+    # http://vllm-small:8000/v1 under Admin > Settings > Connections.
     environment:
-      OPENAI_API_BASE_URLS: http://vllm:8000/v1;http://vllm-tiny:8000/v1
+      OPENAI_API_BASE_URLS: http://vllm:8000/v1;http://vllm-small:8000/v1
       OPENAI_API_KEYS: ${VLLM_API_KEY:-none};${VLLM_API_KEY:-none}

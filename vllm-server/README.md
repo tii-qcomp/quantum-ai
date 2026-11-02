@@ -236,8 +236,42 @@ healthy (a minute or two when the weights are already cached). Open WebUI lists 
 model automatically. The served model name changes with the profile, so API clients should
 read it from `/v1/models` or be updated.
 
-Only one model runs at a time on the single GPU. Small models could share it with a second
-`vllm` service, with `GPU_MEMORY_UTILIZATION` lowered on both.
+By default one model runs at a time. The exception is chain mode, below.
+
+### Chain mode: Falcon-H1R-7B + Falcon-H1-Tiny-R-0.6B together
+
+[docker-compose.chain.yml](docker-compose.chain.yml) runs both reasoning models at once on
+the one GPU, each with a small memory budget. It is meant for multi-step inference chains:
+the tiny model handles the cheap, high-volume steps and the 7B handles the hard ones. vLLM
+serves one model per process, so these are two containers built from the two existing
+profile images. Nothing new is built.
+
+```bash
+# .env
+COMPOSE_FILE=docker-compose.yml:docker-compose.chain.yml
+MODEL_PROFILE=falcon-h1r-7b
+```
+
+```bash
+bash scripts/prefetch.sh falcon-h1r-7b falcon-h1-tiny-r-0.6b
+docker compose up -d
+```
+
+| Service | Model name | Port | GPU budget | Context | Max seqs |
+|---|---|---|---|---|---|
+| `vllm` | `falcon-h1r-7b` | 8000 | 0.30 (~29 GB) | 64k | 32 |
+| `vllm-tiny` | `falcon-h1-tiny-r-0.6b` | 8001 | 0.10 (~10 GB) | 32k | 128 |
+
+Together they use about 40% of the 96 GB. `GPU_MEMORY_UTILIZATION` is a per-instance
+budget, so the two values add up. Tune them with the `CHAIN_*` variables in `.env` (see
+`.env.example`); the sum must stay under about 0.9. `vllm-tiny` starts only after `vllm` is
+healthy, so their startup memory profiling never overlaps. In this mode `scripts/switch-model.sh`
+does not apply, because the overlay pins both images. Remove `COMPOSE_FILE` to go back to
+single-model mode.
+
+Clients pick the model by port (`http://server:8000/v1` or `http://server:8001/v1`). On a
+fresh install, Open WebUI lists both models. On an existing install, add `http://vllm-tiny:8000/v1`
+under Admin > Settings > Connections.
 
 ## Using the API
 
